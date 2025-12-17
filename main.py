@@ -3,6 +3,7 @@ import os
 import threading
 import html
 import json
+import time
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QLineEdit, QFileDialog, QLabel, QFrame,
@@ -11,6 +12,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QObject
 from PySide6.QtGui import QTextCursor, QAction
 from llama_cpp import Llama
+
+# 1️⃣ Config file constant
+CONFIG_FILE = "config.json"
 
 # --- Signals ---
 class ChatSignals(QObject):
@@ -71,14 +75,12 @@ class GGUFChat(QMainWindow):
         self.setMinimumSize(1100, 850)
         self.setStyleSheet(ORANGE_STYLE)
 
-        
         self.llm = None
         self.model_path = None
         self.ai_cursor = None
         self.is_generating = False
         self.stop_requested = False
         self.history = []
-        
         
         self.current_chat_path = None
         self.chats_dir = "chats"
@@ -90,16 +92,31 @@ class GGUFChat(QMainWindow):
         self.signals.finished.connect(self.on_generation_finished)
 
         self.init_ui()
+        self.load_config()
         self.refresh_chat_list()
+
+    def save_config(self):
+        data = {"last_model": self.model_path}
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+
+    def load_config(self):
+        if not os.path.exists(CONFIG_FILE): return
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            last_model = data.get("last_model")
+            if last_model and os.path.exists(last_model):
+                self.model_path = last_model
+                self.model_label.setText(os.path.basename(last_model))
+                self.append_chat("System", "Last model remembered. Click 'Load Model' to activate.")
+        except Exception: pass
 
     def init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
-
-        
         sidebar = QVBoxLayout()
-        
         
         new_chat_btn = QPushButton("+ New Chat")
         new_chat_btn.setObjectName("primaryBtn")
@@ -109,15 +126,12 @@ class GGUFChat(QMainWindow):
         self.chat_list = QListWidget()
         self.chat_list.setMaximumWidth(280)
         self.chat_list.itemClicked.connect(self.load_selected_chat)
-        
-        
         self.chat_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.chat_list.customContextMenuRequested.connect(self.show_context_menu)
         
         sidebar.addWidget(new_chat_btn)
         sidebar.addWidget(self.chat_list)
 
-        
         model_group = QGroupBox("Model Control")
         model_vbox = QVBoxLayout()
         self.model_label = QLabel("No model loaded")
@@ -128,7 +142,6 @@ class GGUFChat(QMainWindow):
         model_vbox.addWidget(self.load_btn)
         model_vbox.addWidget(self.model_label)
         model_group.setLayout(model_vbox)
-        
         
         params_group = QGroupBox("Parameters")
         params_vbox = QVBoxLayout()
@@ -150,7 +163,6 @@ class GGUFChat(QMainWindow):
         params_vbox.addWidget(self.tokens_slider)
         params_group.setLayout(params_vbox)
 
-        
         export_group = QGroupBox("Export")
         export_vbox = QVBoxLayout()
         save_btn = QPushButton("Save History As...")
@@ -161,9 +173,7 @@ class GGUFChat(QMainWindow):
         sidebar.addWidget(params_group)
         sidebar.addWidget(export_group)
 
-        
         chat_vbox = QVBoxLayout()
-        
         self.sys_prompt_edit = QTextEdit()
         self.sys_prompt_edit.setPlaceholderText("System Prompt...")
         self.sys_prompt_edit.setMaximumHeight(60)
@@ -193,7 +203,6 @@ class GGUFChat(QMainWindow):
         main_layout.addLayout(sidebar, 1)
         main_layout.addLayout(chat_vbox, 3)
 
-        # Connections
         browse_btn.clicked.connect(self.browse_model)
         self.load_btn.clicked.connect(self.load_model)
         self.send_btn.clicked.connect(self.send_message)
@@ -201,7 +210,6 @@ class GGUFChat(QMainWindow):
         self.stop_btn.clicked.connect(self.request_stop)
         save_btn.clicked.connect(self.save_history)
 
-    # SESSION MANAGEMENT 
     def generate_chat_title(self):
         for msg in self.history:
             if msg["sender"] == "You":
@@ -211,66 +219,46 @@ class GGUFChat(QMainWindow):
 
     def save_current_chat(self):
         if not self.history: return
-
         title = self.generate_chat_title()
         if not self.current_chat_path:
             safe_title = title.replace(" ", "_").replace("/", "_")[:40]
-            # Add timestamp to prevent name collisions
-            import time
             ts = int(time.time())
             self.current_chat_path = os.path.join(self.chats_dir, f"{ts}_{safe_title}.json")
 
         data = {
-            "version": 1,
-            "title": title,
+            "version": 1, "title": title,
             "system": self.sys_prompt_edit.toPlainText(),
             "messages": self.history
         }
-
         with open(self.current_chat_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        
         self.refresh_chat_list()
 
     def refresh_chat_list(self):
         self.chat_list.blockSignals(True)
         self.chat_list.clear()
-        
         if not os.path.exists(self.chats_dir):
             self.chat_list.blockSignals(False)
             return
-
         files = [f for f in os.listdir(self.chats_dir) if f.endswith(".json")]
-        
         files.sort(key=lambda x: os.path.getmtime(os.path.join(self.chats_dir, x)), reverse=True)
-
         for file in files:
-            
             display_name = file.split("_", 1)[-1].replace(".json", "").replace("_", " ")
             item = QListWidgetItem(display_name)
             item.setData(Qt.UserRole, os.path.join(self.chats_dir, file))
             self.chat_list.addItem(item)
-        
         self.chat_list.blockSignals(False)
 
     def load_selected_chat(self, item):
-        
         path = item.data(Qt.UserRole)
-        
-        
         self.save_current_chat()
-
         if not os.path.exists(path): return
         self.current_chat_path = path
-
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-
         self.chat_area.clear()
         self.history = []
         self.sys_prompt_edit.setText(data.get("system", "You are a helpful assistant."))
-        
-        
         for msg in data.get("messages", []):
             self.append_chat(msg["sender"], msg["message"])
 
@@ -285,7 +273,6 @@ class GGUFChat(QMainWindow):
     def show_context_menu(self, pos):
         item = self.chat_list.itemAt(pos)
         if not item: return
-        
         menu = QMenu()
         delete_action = QAction("Delete Chat", self)
         delete_action.triggered.connect(lambda: self.delete_chat_file(item))
@@ -294,13 +281,10 @@ class GGUFChat(QMainWindow):
 
     def delete_chat_file(self, item):
         path = item.data(Qt.UserRole)
-        if os.path.exists(path):
-            os.remove(path)
-        if self.current_chat_path == path:
-            self.new_chat()
+        if os.path.exists(path): os.remove(path)
+        if self.current_chat_path == path: self.new_chat()
         self.refresh_chat_list()
 
-    # --- CORE CHAT LOGIC ---
     def browse_model(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select GGUF", "", "GGUF Files (*.gguf)")
         if path:
@@ -312,7 +296,14 @@ class GGUFChat(QMainWindow):
         self.append_chat("System", "Loading model into memory...")
         def load():
             try:
-                self.llm = Llama(model_path=self.model_path, n_ctx=2048)
+                if self.llm is not None:
+                    del self.llm
+                    self.llm = None
+                
+                ctx = max(2048, self.tokens_slider.value() + 512)
+                self.llm = Llama(model_path=self.model_path, n_ctx=ctx)
+                
+                self.save_config()
                 self.signals.message.emit("System", "Model ready!")
             except Exception as e:
                 self.signals.message.emit("System", f"Load Error: {str(e)}")
@@ -321,6 +312,16 @@ class GGUFChat(QMainWindow):
     def request_stop(self):
         self.stop_requested = True
         self.stop_btn.setEnabled(False)
+
+    # 🔴 UPDATED: Context Capped Prompt Building
+    def build_prompt(self, max_turns=10):
+        prompt = f"<|system|>\n{self.sys_prompt_edit.toPlainText()}\n"
+        # We slice the history to keep only the last X turns (user + assistant)
+        for msg in self.history[-max_turns*2:]:
+            role = "user" if msg["sender"] == "You" else "assistant"
+            prompt += f"<|{role}|>\n{msg['message']}\n"
+        prompt += "<|assistant|>\n"
+        return prompt
 
     def send_message(self):
         if not self.llm or self.is_generating: return
@@ -336,15 +337,17 @@ class GGUFChat(QMainWindow):
         def generate():
             full_ai_response = ""
             try:
-                self.signals.message.emit("AI", "")
-                prompt = f"<|system|>\n{self.sys_prompt_edit.toPlainText()}\n<|user|>\n{text}\n<|assistant|>\n"
+                # 🔧 STEP 2: Create streaming cursor without touching history
+                self.signals.message.emit("__STREAM__", "")
+                
+                prompt = self.build_prompt()
                 
                 stream = self.llm(
                     prompt, 
                     max_tokens=self.tokens_slider.value(), 
                     temperature=self.temp_slider.value()/100.0, 
                     stream=True, 
-                    stop=["<|user|>", "</s>"]
+                    stop=["<|user|>", "</s>", "<|system|>"]
                 )
 
                 for chunk in stream:
@@ -353,12 +356,15 @@ class GGUFChat(QMainWindow):
                     full_ai_response += token
                     self.signals.token.emit(token)
                 
-                if self.history and self.history[-1]["sender"] == "AI":
-                    self.history[-1]["message"] = full_ai_response
-                
             except Exception as e:
                 self.signals.message.emit("System", f"Error: {str(e)}")
             finally:
+                # 🔧 STEP 3: Append AI message after generation completes
+                if full_ai_response.strip():
+                    self.history.append({
+                        "sender": "AI",
+                        "message": full_ai_response
+                    })
                 self.signals.finished.emit()
 
         threading.Thread(target=generate, daemon=True).start()
@@ -372,36 +378,38 @@ class GGUFChat(QMainWindow):
 
     def append_token(self, token):
         if self.ai_cursor:
-            # Preserve spaces and formatting with insertText
             self.ai_cursor.insertText(token)
             self.chat_area.verticalScrollBar().setValue(self.chat_area.verticalScrollBar().maximum())
 
+    # 🔧 UPDATED: append_chat with specialized streaming logic
     def append_chat(self, sender, message):
-        if sender != "System":
-            self.history.append({"sender": sender, "message": message})
-        
-        safe_msg = html.escape(message)
-        color = "#FF8C00" if sender == "You" else "#BBBBBB"
-        if sender == "System": color = "#555555"
-        
-        if message == "" and sender == "AI":
-            self.chat_area.append(f'<b><span style="color:{color};">{sender}:</span></b> ')
+        if sender == "__STREAM__":
+            self.chat_area.append(
+                '<b><span style="color:#BBBBBB;">AI:</span></b> '
+            )
             self.ai_cursor = self.chat_area.textCursor()
             self.ai_cursor.movePosition(QTextCursor.End)
-        else:
-            self.chat_area.append(f'<b><span style="color:{color};">{sender}:</span></b> {safe_msg}')
-        
+            return
+
+        if sender != "System":
+            self.history.append({"sender": sender, "message": message})
+
+        safe_msg = html.escape(message)
+        color = "#FF8C00" if sender == "You" else "#BBBBBB"
+        if sender == "System":
+            color = "#555555"
+
+        self.chat_area.append(
+            f'<b><span style="color:{color};">{sender}:</span></b> {safe_msg}'
+        )
         self.chat_area.verticalScrollBar().setValue(self.chat_area.verticalScrollBar().maximum())
 
     def save_history(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export JSON", "", "JSON Files (*.json)")
         if not path: return
         if not path.lower().endswith(".json"): path += ".json"
-
         data = {
-            "version": 1,
-            "system": self.sys_prompt_edit.toPlainText(), 
-            "messages": self.history
+            "version": 1, "system": self.sys_prompt_edit.toPlainText(), "messages": self.history
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
